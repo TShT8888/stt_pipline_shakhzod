@@ -10,6 +10,7 @@ wheels/
 .venv
 
 /data/
+*.zip
 .env
 # Secrets & OS junk
 .env
