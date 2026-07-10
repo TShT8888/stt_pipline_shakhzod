@@ -9,7 +9,7 @@ wheels/
 # Virtual environments
 .venv
 
-data/
+/data/
 .env
 # Secrets & OS junk
 .env
