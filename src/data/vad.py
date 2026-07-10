@@ -6,6 +6,7 @@ import platform
 import resource
 import time
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -26,9 +27,9 @@ class VadConfig:
     target_sample_rate: int = DEFAULT_SAMPLE_RATE
     threshold: float = 0.5
     min_speech_duration_ms: int = 250
-    min_silence_duration_ms: int = 300
-    speech_pad_ms: int = 100
-    min_segment_duration: float = 0.5
+    min_silence_duration_ms: int = 1000
+    speech_pad_ms: int = 300
+    min_segment_duration: float = 1.5
     max_segment_duration: float = 30.0
     max_threads: int | None = 1
 
@@ -36,8 +37,8 @@ class VadConfig:
 @dataclass(frozen=True)
 class VadOutputs:
     segments_path: Path
-    summary_path: Path
-    metadata_path: Path
+    summary_path: Path | None
+    metadata_path: Path | None
     num_input_rows: int
     num_processed_rows: int
     num_skipped_shard_rows: int
@@ -259,8 +260,8 @@ def run_vad_manifest(
     *,
     input_manifest: Path,
     output_segments: Path,
-    output_summary: Path,
-    output_metadata: Path,
+    output_summary: Path | None = None,
+    output_metadata: Path | None = None,
     device: str,
     config: VadConfig,
     vad_run_id: str | None = None,
@@ -288,8 +289,15 @@ def run_vad_manifest(
     num_skipped_shard_rows = 0
     num_errors = 0
     total_audio_duration = 0.0
+    num_summaries = 0
 
-    with JsonlWriter(output_segments) as segments_writer, JsonlWriter(output_summary) as summary_writer:
+    with ExitStack() as output_stack:
+        segments_writer = output_stack.enter_context(JsonlWriter(output_segments))
+        summary_writer = (
+            output_stack.enter_context(JsonlWriter(output_summary))
+            if output_summary is not None
+            else None
+        )
         with torch.inference_mode():
             for line_number, row in read_jsonl(input_manifest):
                 num_input_rows += 1
@@ -328,7 +336,9 @@ def run_vad_manifest(
 
                 for segment in segments:
                     segments_writer.write(segment)
-                summary_writer.write(summary)
+                if summary_writer is not None:
+                    summary_writer.write(summary)
+                num_summaries += 1
 
     processing_seconds = time.perf_counter() - started_at
     real_time_factor = (
@@ -338,15 +348,15 @@ def run_vad_manifest(
         "vad_run_id": vad_run_id,
         "input_manifest": str(input_manifest),
         "output_segments": str(output_segments),
-        "output_summary": str(output_summary),
-        "output_metadata": str(output_metadata),
+        "output_summary": str(output_summary) if output_summary is not None else None,
+        "output_metadata": str(output_metadata) if output_metadata is not None else None,
         "shard_index": shard_index,
         "num_shards": num_shards,
         "num_input_rows": num_input_rows,
         "num_processed_rows": num_processed_rows,
         "num_skipped_shard_rows": num_skipped_shard_rows,
         "num_segments": segments_writer.count,
-        "num_summaries": summary_writer.count,
+        "num_summaries": num_summaries,
         "num_errors": num_errors,
         "audio_duration": round(total_audio_duration, 3),
         "processing_seconds": round(processing_seconds, 3),
@@ -354,7 +364,8 @@ def run_vad_manifest(
         "device": str(torch_device),
         "runtime": runtime_metadata(str(torch_device), config),
     }
-    write_json(output_metadata, metadata)
+    if output_metadata is not None:
+        write_json(output_metadata, metadata)
 
     return VadOutputs(
         segments_path=output_segments,
@@ -364,7 +375,7 @@ def run_vad_manifest(
         num_processed_rows=num_processed_rows,
         num_skipped_shard_rows=num_skipped_shard_rows,
         num_segments=segments_writer.count,
-        num_summaries=summary_writer.count,
+        num_summaries=num_summaries,
         num_errors=num_errors,
         audio_duration=total_audio_duration,
         processing_seconds=processing_seconds,

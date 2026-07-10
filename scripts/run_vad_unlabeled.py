@@ -23,19 +23,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-summary",
         type=Path,
-        default=Path("data/interim/vad/unlabeled_audio_summary.jsonl"),
+        default=None,
+        help="Optional per-source-audio summary JSONL. Disabled by default.",
     )
     parser.add_argument(
         "--output-metadata",
         type=Path,
-        default=Path("data/interim/vad/unlabeled_run_metadata.json"),
+        default=None,
+        help="Optional run metadata JSON. Disabled by default.",
     )
     parser.add_argument("--device", default="cpu", help="cpu, cuda, cuda:0, auto")
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--min-speech-duration-ms", type=int, default=250)
-    parser.add_argument("--min-silence-duration-ms", type=int, default=300)
-    parser.add_argument("--speech-pad-ms", type=int, default=100)
-    parser.add_argument("--min-segment-duration", type=float, default=0.5)
+    parser.add_argument("--min-silence-duration-ms", type=int, default=1000)
+    parser.add_argument("--speech-pad-ms", type=int, default=300)
+    parser.add_argument("--min-segment-duration", type=float, default=1.5)
     parser.add_argument("--max-segment-duration", type=float, default=30.0)
     parser.add_argument(
         "--max-threads",
@@ -79,8 +81,8 @@ def main() -> None:
         "status": "ok",
         "outputs": {
             "segments_path": str(outputs.segments_path),
-            "summary_path": str(outputs.summary_path),
-            "metadata_path": str(outputs.metadata_path),
+            "summary_path": str(outputs.summary_path) if outputs.summary_path is not None else None,
+            "metadata_path": str(outputs.metadata_path) if outputs.metadata_path is not None else None,
             "num_input_rows": outputs.num_input_rows,
             "num_processed_rows": outputs.num_processed_rows,
             "num_skipped_shard_rows": outputs.num_skipped_shard_rows,
