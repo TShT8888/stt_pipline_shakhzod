@@ -7,9 +7,6 @@ Current implemented stages:
 - JSONL streaming IO utilities.
 - Text normalization for Uzbek Latin, Uzbek Cyrillic, and Russian/Cyrillic text.
 - VAD over unlabeled audio with Silero VAD.
-
-Planned next stage:
-
 - Materialize VAD segments into real audio clips for pseudo-labeling and fine-tuning.
 
 ## Repository Layout
@@ -29,6 +26,7 @@ data/
 
 scripts/
   run_vad_unlabeled.py
+  materialize_vad_segments.py
 
 src/
   data/
@@ -289,11 +287,29 @@ This materialized manifest is the right input for:
 2. Audio quality filtering.
 3. Final fine-tuning manifest construction.
 
-Planned command:
+Run locally:
 
 ```bash
 .venv/bin/python scripts/materialize_vad_segments.py \
   --segments data/interim/vad/unlabeled_segments.jsonl \
   --output-dir data/processed/unlabeled_vad \
   --format flac
+```
+
+Run on Kaggle after VAD:
+
+```bash
+!python scripts/materialize_vad_segments.py \
+  --segments /kaggle/working/unlabeled_segments_cpu.jsonl \
+  --output-dir /kaggle/working/data/processed/unlabeled_vad \
+  --output-metadata /kaggle/working/materialize_metadata.json \
+  --format flac
+```
+
+Check outputs:
+
+```bash
+!wc -l /kaggle/working/data/processed/unlabeled_vad/manifest.jsonl
+!find /kaggle/working/data/processed/unlabeled_vad/audio -type f | head
+!head -n 3 /kaggle/working/data/processed/unlabeled_vad/manifest.jsonl
 ```
