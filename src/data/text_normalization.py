@@ -8,6 +8,8 @@ from typing import Final
 
 @dataclass(frozen=True)
 class TextNormalizationConfig:
+    """Настройки безопасной текстовой нормализации перед ASR."""
+
     lowercase: bool = True
     normalize_unicode: bool = True
     remove_bracketed_text: bool = True
@@ -18,7 +20,7 @@ class TextNormalizationConfig:
 CHAR_MAP: Final[dict[str, str]] = {
     "\u00a0": " ",
 
-    # Apostrophes used in Uzbek Latin and noisy transcripts.
+    # Апострофы из узбекской латиницы и шумных расшифровок приводим к одному виду.
     "ʻ": "'",
     "ʼ": "'",
     "’": "'",
@@ -27,14 +29,14 @@ CHAR_MAP: Final[dict[str, str]] = {
     "´": "'",
     "ʹ": "'",
 
-    # Quotes.
+    # Кавычки разных видов дальше будут удалены как пунктуация.
     "“": '"',
     "”": '"',
     "„": '"',
     "«": '"',
     "»": '"',
 
-    # Dashes.
+    # Тире разных видов нормализуем перед удалением пунктуации.
     "–": "-",
     "—": "-",
     "−": "-",
@@ -47,14 +49,14 @@ BRACKETED_TEXT_RE: Final[re.Pattern[str]] = re.compile(
 DIGITS_RE: Final[re.Pattern[str]] = re.compile(r"\d+")
 WHITESPACE_RE: Final[re.Pattern[str]] = re.compile(r"\s+")
 
-# Remove punctuation, but apostrophe is handled separately.
+# Пунктуацию удаляем, но апостроф обрабатываем отдельно.
 PUNCT_RE: Final[re.Pattern[str]] = re.compile(
     r"""[!"#$%&()*+,./:;<=>?@\[\]^_`{|}~\\«»“”„…-]"""
 )
 
-# Apostrophe is valid only inside words:
+# Апостроф оставляем только внутри слов:
 #   o'zbek, g'arb, san'at
-# It should be removed around quotes:
+# Вокруг цитат апостроф должен удаляться:
 #   'salom' -> salom
 BAD_APOSTROPHE_RE: Final[re.Pattern[str]] = re.compile(
     r"(?<![0-9A-Za-zА-Яа-яЁёЎўҚқҒғҲҳ])'|'(?![0-9A-Za-zА-Яа-яЁёЎўҚқҒғҲҳ])"
@@ -65,6 +67,13 @@ def normalize_text(
     text: str,
     config: TextNormalizationConfig | None = None,
 ) -> str:
+    """
+    Нормализует текст без определения языка.
+
+    Функция рассчитана на смешанные данные: узбекская латиница, узбекская
+    кириллица и русский. Здесь нет транслитерации и исправления текста моделью:
+    только детерминированная очистка, чтобы не менять смысл транскрипта.
+    """
     if config is None:
         config = TextNormalizationConfig()
 

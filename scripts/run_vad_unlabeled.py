@@ -54,6 +54,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    # CLI-скрипт только собирает параметры. Основная логика остается в src/data/vad.py,
+    # чтобы ее можно было переиспользовать для labeled/unlabeled и будущих пайплайнов.
     config = VadConfig(
         threshold=args.threshold,
         min_speech_duration_ms=args.min_speech_duration_ms,
@@ -64,6 +67,8 @@ def main() -> None:
         max_threads=args.max_threads if args.max_threads > 0 else None,
     )
 
+    # По умолчанию создается только segments JSONL. Summary/metadata пишутся только
+    # если пользователь явно передал --output-summary/--output-metadata.
     outputs = run_vad_manifest(
         input_manifest=args.input_manifest,
         output_segments=args.output_segments,

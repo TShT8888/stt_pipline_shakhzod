@@ -12,7 +12,10 @@ JsonObject = dict[str, Any]
 
 class JsonlWriter:
     """
-    Stream JSONL rows to a temporary file and atomically replace the target on success.
+    Потоковая запись JSONL.
+
+    Пишем сначала во временный файл, а при успешном завершении атомарно заменяем
+    целевой файл. Так пайплайн не оставляет битый JSONL, если процесс упал посередине.
     """
 
     def __init__(self, path: Path) -> None:
@@ -52,7 +55,10 @@ class JsonlWriter:
 
 def read_jsonl(path: Path) -> Iterable[tuple[int, JsonObject]]:
     """
-    Read JSONL line by line without loading the whole file into memory.
+    Читает JSONL построчно без загрузки всего файла в память.
+
+    Возвращает номер строки вместе с объектом, чтобы downstream-этапы могли
+    сохранять provenance и давать понятные ошибки.
     """
     with path.open("r", encoding="utf-8") as file:
         for line_number, raw_line in enumerate(file, start=1):
@@ -76,7 +82,7 @@ def read_jsonl(path: Path) -> Iterable[tuple[int, JsonObject]]:
 
 def write_jsonl(path: Path, rows: Iterable[JsonObject]) -> int:
     """
-    Write JSONL atomically and iteratively.
+    Итеративно и атомарно записывает JSONL.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_suffix(path.suffix + ".tmp")
@@ -100,7 +106,7 @@ def write_jsonl(path: Path, rows: Iterable[JsonObject]) -> int:
 
 def write_json(path: Path, value: JsonObject) -> None:
     """
-    Write one JSON object atomically.
+    Атомарно записывает один JSON-объект.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_suffix(path.suffix + ".tmp")

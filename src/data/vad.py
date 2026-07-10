@@ -24,6 +24,14 @@ SILERO_VAD_MODEL = "silero-vad"
 
 @dataclass(frozen=True)
 class VadConfig:
+    """
+    Конфигурация VAD.
+
+    Значения по умолчанию специально чуть консервативные: короткие шумовые
+    куски отбрасываются, а пауза в 1 секунду помогает не нарезать одну фразу
+    слишком мелко. Для других датасетов эти параметры лучше подбирать benchmark-ом.
+    """
+
     target_sample_rate: int = DEFAULT_SAMPLE_RATE
     threshold: float = 0.5
     min_speech_duration_ms: int = 250
@@ -36,6 +44,8 @@ class VadConfig:
 
 @dataclass(frozen=True)
 class VadOutputs:
+    """Сводка результата одного запуска VAD."""
+
     segments_path: Path
     summary_path: Path | None
     metadata_path: Path | None
@@ -52,11 +62,19 @@ class VadOutputs:
 
 @dataclass(frozen=True)
 class VadRuntime:
+    """Загруженная модель и функция Silero, чтобы не импортировать их на каждую строку."""
+
     model: torch.nn.Module
     get_speech_timestamps: Callable[..., list[dict[str, int]]]
 
 
 def resolve_device(device: str) -> torch.device:
+    """
+    Выбирает устройство для VAD.
+
+    CPU остается дефолтом в CLI, потому что Silero VAD маленький и на batch size 1
+    GPU не всегда быстрее. `auto` оставлен для экспериментов.
+    """
     if device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -68,6 +86,7 @@ def resolve_device(device: str) -> torch.device:
 
 
 def load_vad_runtime(device: torch.device) -> VadRuntime:
+    """Загружает Silero VAD один раз на весь процесс."""
     try:
         from silero_vad import get_speech_timestamps, load_silero_vad
     except ImportError as exc:
@@ -82,6 +101,12 @@ def load_vad_runtime(device: torch.device) -> VadRuntime:
 
 
 def load_audio_mono(path: Path, target_sample_rate: int) -> tuple[torch.Tensor, int]:
+    """
+    Загружает аудио как mono float32 tensor.
+
+    Для mono-файлов не считаем mean, чтобы не создавать лишний массив.
+    Если sample rate отличается от целевого, ресемплим через soxr.
+    """
     audio, sample_rate = sf.read(path, dtype="float32", always_2d=True)
     if audio.shape[1] == 1:
         mono = audio[:, 0]
@@ -105,6 +130,13 @@ def split_long_segment(
     end_sec: float,
     max_duration: float,
 ) -> list[tuple[float, float]]:
+    """
+    Fallback-разбиение слишком длинного сегмента.
+
+    Основное ограничение длины делает Silero через `max_speech_duration_s`,
+    потому что он старается резать возле пауз. Эта функция нужна только как
+    защита, если backend все равно вернул сегмент длиннее лимита.
+    """
     if max_duration <= 0:
         raise ValueError("max_duration must be positive")
 
@@ -125,6 +157,7 @@ def split_long_segment(
 
 
 def resolve_audio_path(input_manifest: Path, audio_path: str) -> Path:
+    """Разрешает относительный путь к аудио относительно manifest-файла."""
     path = Path(audio_path)
     if path.is_absolute():
         return path
@@ -144,6 +177,13 @@ def build_segment_row(
     config: VadConfig,
     vad_run_id: str,
 ) -> JsonObject:
+    """
+    Собирает строку segment manifest.
+
+    Важно: здесь мы не режем аудио физически. Строка хранит исходный файл и
+    offsets (`vad_start`, `vad_end`), чтобы следующий этап мог материализовать
+    реальные clips для pseudo-labeling/fine-tuning.
+    """
     source_audio_id = str(source_row["audio_id"])
     segment_id = f"{source_audio_id}_vad_{vad_index:05d}_{part_index:02d}"
     duration = end_sec - start_sec
@@ -181,6 +221,7 @@ def run_vad_for_row(
     config: VadConfig,
     vad_run_id: str,
 ) -> tuple[list[JsonObject], JsonObject]:
+    """Запускает VAD для одного исходного аудио из manifest."""
     source_audio_id = str(row["audio_id"])
     source_audio_path = resolve_audio_path(input_manifest, str(row["audio_path"]))
     waveform, sample_rate = load_audio_mono(source_audio_path, config.target_sample_rate)
@@ -217,6 +258,8 @@ def run_vad_for_row(
                 dropped_short += 1
                 continue
 
+            # vad_kept_duration включает speech_pad_ms, поэтому это не "чистая речь",
+            # а длительность аудио, которую мы оставляем после VAD.
             vad_kept_duration += segment_duration
             segments.append(
                 build_segment_row(
@@ -269,6 +312,12 @@ def run_vad_manifest(
     num_shards: int = 1,
     fail_fast: bool = False,
 ) -> VadOutputs:
+    """
+    Запускает VAD по manifest-файлу.
+
+    По умолчанию пишется только `output_segments`, чтобы не плодить много JSON.
+    `output_summary` и `output_metadata` включаются явно, когда нужен аудит или benchmark.
+    """
     if num_shards <= 0:
         raise ValueError("num_shards must be positive")
     if shard_index < 0 or shard_index >= num_shards:
@@ -301,6 +350,9 @@ def run_vad_manifest(
         with torch.inference_mode():
             for line_number, row in read_jsonl(input_manifest):
                 num_input_rows += 1
+
+                # Sharding позволяет запускать несколько независимых jobs без общей записи
+                # в один JSONL. Это проще и надежнее, чем multiprocessing внутри процесса.
                 if (line_number - 1) % num_shards != shard_index:
                     num_skipped_shard_rows += 1
                     continue
@@ -384,6 +436,7 @@ def run_vad_manifest(
 
 
 def runtime_metadata(device: str, config: VadConfig) -> JsonObject:
+    """Собирает run-level metadata для benchmark и отладки."""
     peak_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     if platform.system() == "Darwin":
         peak_rss_mb = peak_rss_mb / (1024 * 1024)
@@ -406,6 +459,7 @@ def build_vad_run_id(
     shard_index: int,
     num_shards: int,
 ) -> str:
+    """Строит стабильный id запуска по manifest, config и shard-параметрам."""
     config_text = json.dumps(asdict(config), sort_keys=True, separators=(",", ":"))
     raw = f"{input_manifest}|{config_text}|{shard_index}|{num_shards}".encode("utf-8")
     digest = hashlib.sha256(raw).hexdigest()[:16]
