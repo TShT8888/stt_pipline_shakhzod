@@ -70,6 +70,189 @@ data/
 Папка `data/` игнорируется Git. Архивы `*.zip` тоже игнорируются, чтобы большие данные
 случайно не попали в репозиторий.
 
+## Контракт данных
+
+Все manifest-файлы должны быть в формате JSONL: одна строка - один JSON-объект.
+Пустые строки пропускаются. Относительный `audio_path` всегда считается относительно
+папки, где лежит сам manifest.
+
+### Raw unlabeled manifest
+
+Файл:
+
+```text
+data/raw/unlabeled/manifest.jsonl
+```
+
+Используется этапом VAD.
+
+Обязательные поля:
+
+```text
+audio_id
+audio_path
+```
+
+Опциональные поля:
+
+```text
+duration
+sample_rate
+channels
+dataset
+language
+split
+source_clips
+```
+
+Минимальный валидный пример:
+
+```json
+{"audio_id":"unlabeled_001","audio_path":"audio/unlabeled_001.wav"}
+```
+
+Рекомендуемый пример:
+
+```json
+{"audio_id":"unlabeled_001","audio_path":"audio/unlabeled_001.wav","duration":87.656,"sample_rate":16000,"channels":1,"dataset":"example/dataset","language":"uz"}
+```
+
+Если `language`, `dataset`, `split` или похожих полей нет, пайплайн не упадет:
+в downstream JSONL эти значения будут `null`. Если нет `audio_id` или `audio_path`,
+VAD не сможет обработать строку.
+
+### Raw labeled manifest
+
+Файл:
+
+```text
+data/raw/labeled/metadata.jsonl
+```
+
+Используется напрямую этапами `overlap` и `audio_quality`.
+
+Обязательные поля:
+
+```text
+audio_id
+audio_path
+duration
+```
+
+Опциональные поля:
+
+```text
+text
+sample_rate
+channels
+dataset
+language
+split
+```
+
+Минимальный валидный пример:
+
+```json
+{"audio_id":"labeled_001","audio_path":"audio/labeled_001.wav","duration":4.788}
+```
+
+Рекомендуемый пример:
+
+```json
+{"audio_id":"labeled_001","audio_path":"audio/labeled_001.wav","duration":4.788,"sample_rate":16000,"channels":1,"dataset":"example/dataset","language":"uz","split":"train","text":"Salom dunyo"}
+```
+
+`text` нужен будущему train-manifest, но текущие `overlap` и `audio_quality` его не
+требуют. Если вместо `language` будет `lang`, код не упадет, но поле `language` в
+feature JSONL будет `null`. Если вместо `audio_path` будет `path`, текущий код
+упадет, потому что `audio_path` - обязательное поле контракта.
+
+### VAD segments manifest
+
+Файл:
+
+```text
+data/interim/vad/unlabeled_segments.jsonl
+```
+
+Создается `scripts/run_vad_unlabeled.py` и используется `scripts/materialize_vad_segments.py`.
+
+Обязательные поля для materialize:
+
+```text
+segment_id
+source_audio_path
+vad_start
+vad_end
+```
+
+Эти поля генерируются самим VAD stage. Руками такой manifest обычно писать не нужно.
+
+Пример:
+
+```json
+{"segment_id":"unlabeled_001_vad_00000_00","source_audio_id":"unlabeled_001","source_audio_path":"data/raw/unlabeled/audio/unlabeled_001.wav","vad_start":0.0,"vad_end":6.956,"vad_duration":6.956,"language":"uz","dataset":"example/dataset"}
+```
+
+### Materialized VAD clips manifest
+
+Файл:
+
+```text
+data/processed/unlabeled_vad/manifest.jsonl
+```
+
+Создается `scripts/materialize_vad_segments.py`. Дальше используется так же, как
+labeled manifest: его можно отдавать в `overlap`, `audio_quality`, pseudo-labeling
+и будущий selector.
+
+Обязательные поля:
+
+```text
+audio_id
+audio_path
+duration
+```
+
+Опциональные, но полезные поля:
+
+```text
+sample_rate
+channels
+dataset
+language
+source_audio_id
+source_audio_path
+source_start
+source_end
+vad_run_id
+```
+
+Пример:
+
+```json
+{"audio_id":"unlabeled_001_vad_00000_00","audio_path":"audio/unlabeled_001_vad_00000_00.flac","duration":6.956,"sample_rate":16000,"channels":1,"language":"uz","dataset":"example/dataset","source_audio_id":"unlabeled_001","source_start":0.0,"source_end":6.956}
+```
+
+### Feature manifests
+
+Feature-файлы не заменяют исходные manifest-ы. Каждый stage пишет отдельный JSONL:
+
+```text
+data/features/overlap/*.jsonl
+data/features/audio_quality/*.jsonl
+```
+
+Общее обязательное поле для join:
+
+```text
+audio_id
+```
+
+Идея такая: исходный manifest остается неизменным, а будущий selector объединит
+`manifest + overlap + audio_quality + pseudo_labels` по `audio_id` и решит, какие
+строки идут в fine-tuning.
+
 ## Установка
 
 Нужен Python 3.11.
