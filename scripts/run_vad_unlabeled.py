@@ -47,6 +47,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--num-shards", type=int, default=1)
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Optional max number of manifest rows to process after sharding. Useful for debug runs.",
+    )
     parser.add_argument("--vad-run-id", default=None)
     parser.add_argument("--fail-fast", action="store_true")
     return parser.parse_args()
@@ -79,6 +85,7 @@ def main() -> None:
         vad_run_id=args.vad_run_id,
         shard_index=args.shard_index,
         num_shards=args.num_shards,
+        limit=args.limit,
         fail_fast=args.fail_fast,
     )
 

@@ -80,3 +80,6 @@ def test_build_vad_run_id_is_stable() -> None:
     assert build_vad_run_id(Path("manifest.jsonl"), config, 1, 4) != build_vad_run_id(
         Path("manifest.jsonl"), config, 0, 4
     )
+    assert build_vad_run_id(Path("manifest.jsonl"), config, 0, 4, 10) != build_vad_run_id(
+        Path("manifest.jsonl"), config, 0, 4, 20
+    )

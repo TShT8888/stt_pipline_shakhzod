@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import platform
-import resource
 import time
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -16,6 +14,7 @@ import torch
 
 from src.data.jsonl import JsonObject, JsonlWriter, read_jsonl
 from src.data.jsonl import write_json
+from src.data.runtime import resolve_torch_device, torch_runtime_metadata
 
 
 DEFAULT_SAMPLE_RATE = 16_000
@@ -75,14 +74,7 @@ def resolve_device(device: str) -> torch.device:
     CPU остается дефолтом в CLI, потому что Silero VAD маленький и на batch size 1
     GPU не всегда быстрее. `auto` оставлен для экспериментов.
     """
-    if device == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    resolved = torch.device(device)
-    if resolved.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA device was requested, but torch.cuda.is_available() is False")
-
-    return resolved
+    return resolve_torch_device(device)
 
 
 def load_vad_runtime(device: torch.device) -> VadRuntime:
@@ -310,6 +302,7 @@ def run_vad_manifest(
     vad_run_id: str | None = None,
     shard_index: int = 0,
     num_shards: int = 1,
+    limit: int | None = None,
     fail_fast: bool = False,
 ) -> VadOutputs:
     """
@@ -322,10 +315,12 @@ def run_vad_manifest(
         raise ValueError("num_shards must be positive")
     if shard_index < 0 or shard_index >= num_shards:
         raise ValueError("shard_index must satisfy 0 <= shard_index < num_shards")
+    if limit is not None and limit <= 0:
+        raise ValueError("limit must be positive")
 
     started_at = time.perf_counter()
     if vad_run_id is None:
-        vad_run_id = build_vad_run_id(input_manifest, config, shard_index, num_shards)
+        vad_run_id = build_vad_run_id(input_manifest, config, shard_index, num_shards, limit)
 
     torch_device = resolve_device(device)
     if config.max_threads is not None:
@@ -349,11 +344,15 @@ def run_vad_manifest(
         )
         with torch.inference_mode():
             for line_number, row in read_jsonl(input_manifest):
+                is_shard_row = (line_number - 1) % num_shards == shard_index
+                if is_shard_row and limit is not None and num_processed_rows >= limit:
+                    break
+
                 num_input_rows += 1
 
                 # Sharding позволяет запускать несколько независимых jobs без общей записи
                 # в один JSONL. Это проще и надежнее, чем multiprocessing внутри процесса.
-                if (line_number - 1) % num_shards != shard_index:
+                if not is_shard_row:
                     num_skipped_shard_rows += 1
                     continue
 
@@ -404,6 +403,7 @@ def run_vad_manifest(
         "output_metadata": str(output_metadata) if output_metadata is not None else None,
         "shard_index": shard_index,
         "num_shards": num_shards,
+        "limit": limit,
         "num_input_rows": num_input_rows,
         "num_processed_rows": num_processed_rows,
         "num_skipped_shard_rows": num_skipped_shard_rows,
@@ -437,20 +437,7 @@ def run_vad_manifest(
 
 def runtime_metadata(device: str, config: VadConfig) -> JsonObject:
     """Собирает run-level metadata для benchmark и отладки."""
-    peak_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    if platform.system() == "Darwin":
-        peak_rss_mb = peak_rss_mb / (1024 * 1024)
-    else:
-        peak_rss_mb = peak_rss_mb / 1024
-
-    return {
-        "device": device,
-        "torch_version": torch.__version__,
-        "cuda_available": torch.cuda.is_available(),
-        "platform": platform.platform(),
-        "peak_rss_mb": round(peak_rss_mb, 3),
-        "vad_config": asdict(config),
-    }
+    return torch_runtime_metadata(device=device, config_key="vad_config", config=config)
 
 
 def build_vad_run_id(
@@ -458,9 +445,10 @@ def build_vad_run_id(
     config: VadConfig,
     shard_index: int,
     num_shards: int,
+    limit: int | None = None,
 ) -> str:
     """Строит стабильный id запуска по manifest, config и shard-параметрам."""
     config_text = json.dumps(asdict(config), sort_keys=True, separators=(",", ":"))
-    raw = f"{input_manifest}|{config_text}|{shard_index}|{num_shards}".encode("utf-8")
+    raw = f"{input_manifest}|{config_text}|{shard_index}|{num_shards}|{limit}".encode("utf-8")
     digest = hashlib.sha256(raw).hexdigest()[:16]
     return f"vad_{digest}"
