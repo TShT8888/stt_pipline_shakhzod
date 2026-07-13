@@ -707,3 +707,115 @@ git status --short
 - pseudo-labeling для неразмеченных VAD-клипов;
 - фильтрация плохих сегментов;
 - сбор финальных train/valid/test manifests для fine-tuning.
+
+
+## Этап 6. Music detection
+
+Файлы:
+
+- `scripts/run_music_detection.py` - CLI-обертка;
+- `src/data/music_detection.py` - основная логика.
+
+Этот этап помечает аудио, в которых есть музыка. Silero VAD принимает пение и
+вокал за речь, поэтому песни и музыкальные вставки проходят VAD и портят корпус
+для SSL. Детектор считает вероятность верхнеуровневой AudioSet-метки `Music`
+классификатором AST (`MIT/ast-finetuned-audioset-10-10-0.4593`).
+
+Длинные клипы режутся на окна по 10 секунд, все окна одного клипа прогоняются
+одним батчем, а per-clip сигнал берется как максимум по окнам. Модель ждет 16 кГц,
+поэтому аудио автоматически ресемплится через soxr.
+
+Входной manifest - стандартный для пайплайна:
+
+```text
+audio_id
+audio_path
+duration
+```
+
+Подходит для:
+
+- labeled данных: `data/raw/labeled/metadata.jsonl`;
+- нарезанных unlabeled VAD clips: `data/processed/unlabeled_vad/manifest.jsonl`.
+
+Как и overlap/audio_quality, этот этап пишет отдельный feature JSONL, а финальный
+selector join-ит его по `audio_id` и режет клипы с `is_music == true`.
+
+Зависимости: этот этап требует `transformers` и `torchaudio` (см. «Установка»).
+Первый запуск скачивает чекпойнт AST (~350 МБ).
+
+Debug-запуск на первых 10 клипах:
+
+```bash
+.venv/bin/python scripts/run_music_detection.py \
+  --input-manifest data/processed/unlabeled_vad/manifest.jsonl \
+  --output-features data/features/music/unlabeled_vad_music_10.jsonl \
+  --output-metadata data/features/music/unlabeled_vad_music_10_metadata.json \
+  --device cpu \
+  --limit 10
+```
+
+Полный unlabeled запуск (на сервере с GPU лучше `--device auto` и больший batch):
+
+```bash
+.venv/bin/python scripts/run_music_detection.py \
+  --input-manifest data/processed/unlabeled_vad/manifest.jsonl \
+  --output-features data/features/music/unlabeled_vad_music.jsonl \
+  --output-metadata data/features/music/unlabeled_vad_music_metadata.json \
+  --device auto \
+  --batch-size 16
+```
+
+Запуск для labeled данных:
+
+```bash
+.venv/bin/python scripts/run_music_detection.py \
+  --input-manifest data/raw/labeled/metadata.jsonl \
+  --output-features data/features/music/labeled_music.jsonl \
+  --output-metadata data/features/music/labeled_music_metadata.json \
+  --device auto
+```
+
+Параметры:
+
+- `--music-threshold` (0.5 по умолчанию) - порог `music_probability` для `is_music`.
+  Прогоните debug-запуск, посмотрите `top_labels` у помеченных клипов и подстройте
+  под свои данные (для эфиров/медиа часто лучше 0.4-0.6);
+- `--window-seconds` (10.0) - размер окна, совпадает с «родным» окном AST;
+- `--batch-size` (8) - число окон в одном forward;
+- `--top-k-labels` (5) - сколько меток класть в `top_labels` для аудита.
+
+### Sharding
+
+Как и остальные этапы, поддерживает независимые shard-процессы:
+
+```bash
+.venv/bin/python scripts/run_music_detection.py \
+  --input-manifest data/processed/unlabeled_vad/manifest.jsonl \
+  --num-shards 4 \
+  --shard-index 0 \
+  --output-features data/features/music/unlabeled_vad_music_0.jsonl
+```
+
+Потом повторить с `--shard-index 1`, `2`, `3`, каждый в свой `--output-features`.
+
+Пример строки feature JSONL:
+
+```json
+{
+  "audio_id": "unlabeled_xxx_vad_00001_00",
+  "feature_type": "music_detection",
+  "feature_version": "1.0",
+  "status": "ok",
+  "duration": 8.408,
+  "music_probability": 0.93,
+  "music_mean_probability": 0.88,
+  "music_ratio": 1.0,
+  "is_music": true,
+  "num_windows": 1,
+  "top_labels": [
+    {"label": "Music", "probability": 0.93},
+    {"label": "Singing", "probability": 0.81}
+  ]
+}
+```
