@@ -15,6 +15,7 @@
 - overlap features для labeled и materialized unlabeled аудио;
 - audio quality features для labeled и materialized unlabeled аудио;
 - music detection (детекция музыки) для labeled и materialized unlabeled аудио;
+- отбор данных: selection для SSL (unlabeled) и split train/val/test (labeled);
 - тесты на ключевые части пайплайна.
 
 ## Структура репозитория
@@ -26,6 +27,8 @@ scripts/
   run_overlap.py              # CLI для подсчета overlapped speech features
   run_audio_quality.py        # CLI для подсчета audio quality features
   run_music_detection.py      # CLI для детекции музыки
+  run_select_ssl.py           # CLI для отбора unlabeled клипов под SSL
+  run_split_labeled.py        # CLI для фильтрации labeled и сплита train/val/test
 
 src/
   data/
@@ -38,6 +41,9 @@ src/
     overlap.py                # основная логика подсчета overlap features
     audio_quality.py          # основная логика подсчета audio quality features
     music_detection.py        # основная логика детекции музыки (AST/AudioSet)
+    selection.py              # общие аудио-гейты, join фич, score, хэш-сплит
+    ssl_selection.py          # отбор unlabeled клипов под SSL
+    labeled_split.py          # фильтрация labeled + сплит train/val/test
 
 tests/
   test_audio_quality.py       # тесты audio quality stage
@@ -46,6 +52,7 @@ tests/
   test_materialize.py         # тесты нарезки аудио и manifest-выхода
   test_overlap.py             # тесты overlap-логики без загрузки тяжелой модели
   test_music_detection.py     # тесты music-detection без загрузки тяжелой модели
+  test_selection.py           # тесты гейтов, score и сплита (без аудио и моделей)
 
 pyproject.toml                # зависимости, dev-зависимости, настройки pytest/ruff
 README.md                     # описание пайплайна
@@ -254,9 +261,9 @@ data/features/music/*.jsonl
 audio_id
 ```
 
-Идея такая: исходный manifest остается неизменным, а будущий selector объединит
-`manifest + overlap + audio_quality + music + pseudo_labels` по `audio_id` и решит,
-какие строки идут в fine-tuning.
+Идея такая: исходный manifest остается неизменным, а selector объединяет
+`manifest + overlap + audio_quality + music` по `audio_id` и решает, какие строки
+идут в обучение (см. «Этап 7. Отбор данных для обучения»).
 
 ## Установка
 
@@ -396,6 +403,104 @@ REQUESTS_CA_BUNDLE=/absolute/path/to/corp-ca.pem
 ```text
 HF_TOKEN=hf_...
 ```
+
+### Полный прогон: собрать данные для SSL и train/val/test
+
+Реальные датасеты собираются без `--limit`, на полных манифестах. Две независимые
+ветки. Предпосылки (разово): `pip install -e . --no-deps`; установлены
+`silero-vad`, `pyannote.audio`, `transformers`, `torchaudio`; приняты условия
+`pyannote/segmentation` на HuggingFace; за корпоративным прокси - CA-бандл в `.env`
+(`REQUESTS_CA_BUNDLE=/путь/до/corp-ca.pem`).
+
+**Ветка A. Unlabeled -> SSL:**
+
+```bash
+# 1. VAD -> координаты речи
+.venv/bin/python scripts/run_vad_unlabeled.py \
+  --input-manifest data/raw/unlabeled/manifest.jsonl \
+  --output-segments data/interim/vad/unlabeled_segments.jsonl \
+  --output-metadata data/interim/vad/unlabeled_metadata.json \
+  --device cpu --max-threads 1
+
+# 2. Materialize -> реальные клипы + manifest
+.venv/bin/python scripts/materialize_vad_segments.py \
+  --segments data/interim/vad/unlabeled_segments.jsonl \
+  --output-dir data/processed/unlabeled_vad \
+  --output-metadata data/processed/unlabeled_vad/materialize_metadata.json \
+  --format flac --overwrite
+
+# 3. Фичи на ВСЕХ клипах (без --limit)
+.venv/bin/python scripts/run_audio_quality.py \
+  --input-manifest data/processed/unlabeled_vad/manifest.jsonl \
+  --output-features data/features/audio_quality/unlabeled_vad_quality.jsonl \
+  --output-metadata data/features/audio_quality/unlabeled_vad_quality_metadata.json
+
+.venv/bin/python scripts/run_overlap.py \
+  --input-manifest data/processed/unlabeled_vad/manifest.jsonl \
+  --output-features data/features/overlap/unlabeled_vad_overlap.jsonl \
+  --output-metadata data/features/overlap/unlabeled_vad_overlap_metadata.json \
+  --device auto
+
+.venv/bin/python scripts/run_music_detection.py \
+  --input-manifest data/processed/unlabeled_vad/manifest.jsonl \
+  --output-features data/features/music/unlabeled_vad_music.jsonl \
+  --output-metadata data/features/music/unlabeled_vad_music_metadata.json \
+  --device auto --batch-size 16
+
+# 4. Отбор -> плоский manifest для SSL
+.venv/bin/python scripts/run_select_ssl.py \
+  --input-manifest data/processed/unlabeled_vad/manifest.jsonl \
+  --quality-features data/features/audio_quality/unlabeled_vad_quality.jsonl \
+  --overlap-features data/features/overlap/unlabeled_vad_overlap.jsonl \
+  --music-features  data/features/music/unlabeled_vad_music.jsonl \
+  --output-selected data/selection/ssl_selected.jsonl \
+  --output-rejected data/selection/ssl_rejected.jsonl \
+  --output-metadata data/selection/ssl_metadata.json \
+  --max-clips-per-source 100
+```
+
+**Ветка B. Labeled -> train/val/test** (VAD и materialize не нужны):
+
+```bash
+# 1. Фичи на ВСЕХ размеченных клипах (без --limit)
+.venv/bin/python scripts/run_audio_quality.py \
+  --input-manifest data/raw/labeled/metadata.jsonl \
+  --output-features data/features/audio_quality/labeled_quality.jsonl \
+  --output-metadata data/features/audio_quality/labeled_quality_metadata.json
+
+.venv/bin/python scripts/run_overlap.py \
+  --input-manifest data/raw/labeled/metadata.jsonl \
+  --output-features data/features/overlap/labeled_overlap.jsonl \
+  --output-metadata data/features/overlap/labeled_overlap_metadata.json \
+  --device auto
+
+.venv/bin/python scripts/run_music_detection.py \
+  --input-manifest data/raw/labeled/metadata.jsonl \
+  --output-features data/features/music/labeled_music.jsonl \
+  --output-metadata data/features/music/labeled_music_metadata.json \
+  --device auto --batch-size 16
+
+# 2. Фильтр + сплит 80/10/10
+.venv/bin/python scripts/run_split_labeled.py \
+  --input-manifest data/raw/labeled/metadata.jsonl \
+  --quality-features data/features/audio_quality/labeled_quality.jsonl \
+  --overlap-features data/features/overlap/labeled_overlap.jsonl \
+  --music-features  data/features/music/labeled_music.jsonl \
+  --output-dir data/selection/labeled_split \
+  --train-ratio 0.8 --val-ratio 0.1 --test-ratio 0.1
+```
+
+Проверить, что и сколько собралось:
+
+```bash
+.venv/bin/python -c "import json; m=json.load(open('data/selection/ssl_metadata.json')); print('SSL:', m['num_selected'], 'клипов /', m['selected_hours'], 'ч; отказы:', m['reject_histogram'])"
+.venv/bin/python -c "import json; m=json.load(open('data/selection/labeled_split/split_metadata.json')); print('split:', m['split_counts'], '; отказы:', m['reject_histogram'])"
+```
+
+Итог: `data/selection/ssl_selected.jsonl` -> SSL continued pretraining;
+`data/selection/labeled_split/{train,val,test}.jsonl` -> supervised fine-tuning.
+На CPU самый долгий шаг - music detection; на сервере ставь `--device auto` и при
+больших данных шардируй (`--num-shards/--shard-index`).
 
 ## Этап 1. Нормализация текста
 
@@ -728,8 +833,10 @@ HF_TOKEN=... .venv/bin/python scripts/run_overlap.py \
 6. Посчитать overlap features для labeled и materialized unlabeled аудио.
 7. Посчитать audio quality features для labeled и materialized unlabeled аудио.
 8. Посчитать music detection для materialized unlabeled аудио и пометить `is_music`.
-9. Следующим этапом запускать pseudo-labeling ASR-моделью.
-10. После pseudo-labeling считать качество текста и собирать финальный training manifest.
+9. Отобрать unlabeled клипы под SSL (`run_select_ssl.py`) и разбить labeled на
+   train/val/test (`run_split_labeled.py`) — см. «Этап 7. Отбор данных для обучения».
+10. Запустить SSL continued pretraining на отобранном manifest; параллельно
+    pseudo-labeling unlabeled клипов под последующий supervised fine-tuning.
 
 ## Что запускать перед commit
 
@@ -741,11 +848,10 @@ git status --short
 
 ## Следующие этапы пайплайна
 
-Планируемые модули после VAD и нарезки:
+Планируемые модули (фильтрация и сборка train/val/test уже сделаны на «Этапе 7»):
 
-- pseudo-labeling для неразмеченных VAD-клипов;
-- фильтрация плохих сегментов;
-- сбор финальных train/valid/test manifests для fine-tuning.
+- pseudo-labeling неразмеченных VAD-клипов (после SSL, под supervised fine-tuning);
+- сбор финального train-manifest с псевдо-транскриптами и их фильтрация по качеству текста.
 
 
 ## Этап 6. Music detection
@@ -858,3 +964,118 @@ Debug-запуск на первых 10 клипах:
   ]
 }
 ```
+
+## Этап 7. Отбор данных для обучения (SSL + train/val/test)
+
+Файлы:
+
+- `scripts/run_select_ssl.py` + `src/data/ssl_selection.py` - отбор unlabeled под SSL;
+- `scripts/run_split_labeled.py` + `src/data/labeled_split.py` - фильтр labeled + сплит;
+- `src/data/selection.py` - общие аудио-гейты, join фич, score, детерминированный хэш-сплит.
+
+Финальный этап подготовки данных. Оба селектора **читают только JSONL**
+(`manifest` + feature-файлы), не открывают аудио и не грузят модели, поэтому быстрые и
+CPU-only. Джойн идёт по `audio_id`. Если feature-файл не передан, соответствующий гейт
+пропускается (в CLI это включается автоматически по наличию флага).
+
+### Как отбираем: аудио-гейты
+
+Клип должен пройти **все** гейты, иначе уходит в `rejected.jsonl` со списком причин.
+Пороги сбалансированные; каждый переопределяется флагом CLI.
+
+| Признак | SSL (unlabeled) | Labeled (train/val/test) | Зачем |
+|---|---|---|---|
+| статус всех фич | ok | ok | битые/непосчитанные прочь |
+| `duration` | 3.0–30.0 с | 0.8–30.0 с | SSL нужен контекст; labeled-клипы короткие |
+| `sample_rate` | =16000 | =16000 | энкодер 16 кГц |
+| `clipping_ratio` | ≤0.001 | ≤0.001 | искажения |
+| `silence_ratio` | ≤0.5 | ≤0.6 | не пустышка |
+| `rms_dbfs` | −45…−3 | −45…−3 | не шёпот/перегруз |
+| `snr_estimate_db` | ≥8 | ≥5 | labeled щадим сильнее |
+| `overlap_ratio` | ≤0.15 | ≤0.2 | одноголосье, без crosstalk |
+| `is_music` | должно быть false | должно быть false | музыку/пение вон |
+| `dc_offset_mean_abs` | ≤0.01 | ≤0.01 | битая конвертация |
+| текст (только labeled) | — | непустой после нормализации, 3–25 симв/с | пустые/битые транскрипты |
+
+Эффективные пороги при запуске через CLI берутся из аргументов скрипта (значения выше -
+их дефолты). Меняешь порог - флагом или в `parse_args` соответствующего скрипта.
+
+### SSL: отбор unlabeled клипов
+
+Текст не нужен: SSL/continued pretraining учится из сырого аудио. Берём всё, что прошло
+гейты (бюджет и diversity-кап по умолчанию выключены). Выход - плоский manifest, готовый
+для SSL-загрузчика, плюс поля `selection_score` и `selection_run_id`.
+
+Debug (на фичах, посчитанных с `--limit 10`):
+
+```bash
+.venv/bin/python scripts/run_select_ssl.py \
+  --input-manifest data/processed/unlabeled_vad_debug_10/manifest.jsonl \
+  --quality-features data/features/audio_quality/unlabeled_vad_debug_10_quality_10.jsonl \
+  --overlap-features data/features/overlap/unlabeled_vad_debug_10_overlap_10.jsonl \
+  --music-features data/features/music/unlabeled_vad_debug_10_music_10.jsonl \
+  --output-selected data/selection/ssl_debug_10_selected.jsonl \
+  --output-rejected data/selection/ssl_debug_10_rejected.jsonl \
+  --output-metadata data/selection/ssl_debug_10_metadata.json
+```
+
+Полный прогон (шардированные фичи подставляются через glob; включаем diversity-кап):
+
+```bash
+.venv/bin/python scripts/run_select_ssl.py \
+  --input-manifest data/processed/unlabeled_vad/manifest.jsonl \
+  --quality-features data/features/audio_quality/unlabeled_vad_quality*.jsonl \
+  --overlap-features data/features/overlap/unlabeled_vad_overlap*.jsonl \
+  --music-features data/features/music/unlabeled_vad_music*.jsonl \
+  --output-selected data/selection/ssl_selected.jsonl \
+  --output-rejected data/selection/ssl_rejected.jsonl \
+  --output-metadata data/selection/ssl_metadata.json \
+  --max-clips-per-source 100
+```
+
+Полезные флаги: `--max-clips-per-source N` (не давать одной исходной записи забить
+корпус), `--target-hours N` (взять топ-N часов по `quality_score`), `--languages uz ru`.
+
+### Labeled: сплит train/val/test
+
+Дополнительно к аудио-гейтам проверяется текст. Прошедшие клипы **детерминированно**
+раскидываются по train/val/test:
+
+- разбиение по hash от `--group-key` (дефолт `audio_id` - поклиповое);
+- **защита от утечки диктора**: если в manifest есть поле спикера, задай
+  `--group-key speaker_id` - все клипы одного диктора уйдут в один сплит;
+- **стратификация** по `--stratify-keys` (дефолт `dataset language`) - пропорции
+  языков/датасетов одинаковы во всех сплитах;
+- воспроизводимо: тот же вход и `--salt` дают тот же сплит.
+
+```bash
+.venv/bin/python scripts/run_split_labeled.py \
+  --input-manifest data/raw/labeled/metadata.jsonl \
+  --quality-features data/features/audio_quality/labeled_quality_10.jsonl \
+  --overlap-features data/features/overlap/labeled_overlap_10.jsonl \
+  --music-features data/features/music/labeled_music_10.jsonl \
+  --output-dir data/selection/labeled_split \
+  --train-ratio 0.8 --val-ratio 0.1 --test-ratio 0.1
+```
+
+Выход:
+
+```text
+data/selection/labeled_split/
+  train.jsonl
+  val.jsonl
+  test.jsonl
+  rejected.jsonl        # что и почему отсеяли
+  split_metadata.json   # счётчики, часы, гистограмма причин, разбивка по языкам
+```
+
+Строки train/val/test - это исходный labeled-формат (`audio_id`, `audio_path`,
+`duration`, `text`, ...) плюс поля `split` и `split_run_id`. Готово для supervised
+fine-tuning.
+
+### Что читать в результатах
+
+- `*_metadata.json` / `split_metadata.json`: `num_selected`, `reject_histogram`,
+  `selected_hours` / `split_counts`. Много `missing_*` означает, что фичи посчитаны не
+  на всех клипах (например, дебажный `--limit 10`) - на полном прогоне этого не будет.
+- `rejected.jsonl`: по каждому отсеянному клипу - список `reject_reasons`.
